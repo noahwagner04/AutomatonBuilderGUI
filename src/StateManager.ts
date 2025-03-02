@@ -1,4 +1,5 @@
 import NodeWrapper from "./NodeWrapper";
+import CommentRegion from "./CommentRegion";
 import { Tool } from "./Tool";
 import Konva from "konva";
 import TransitionWrapper from "./TransitionWrapper";
@@ -37,6 +38,9 @@ export default class StateManager {
   /** Holds all of the transition wrappers in the automaton. */
   private static _transitionWrappers: Array<TransitionWrapper> = [];
 
+  /** Holds all of the comment regions in the grid */
+  private static _commentRegions: Array<CommentRegion> = [];
+
   /** Holds all of the tokens in the automaton. */
   private static _alphabet: Array<TokenWrapper> = [];
 
@@ -72,6 +76,9 @@ export default class StateManager {
 
   /** The layer of the Konva stage where transitions are drawn. */
   private static _transitionLayer: Konva.Layer | null = null;
+
+  /** The layer of the Konva stage where comment regions are drawn */
+  private static _commentLayer: Konva.Layer | null = null;
 
   /** The layer of the Konva stage where the grid is drawn. */
   private static _gridLayer: Konva.Layer | null = null;
@@ -140,6 +147,7 @@ export default class StateManager {
     this._startNode = null;
     this._nodeWrappers = [];
     this._transitionWrappers = [];
+    this._commentRegions = [];
 
     Konva.hitOnDragEnabled = true;
 
@@ -159,6 +167,7 @@ export default class StateManager {
     this._nodeLayer = new Konva.Layer();
     this._transitionLayer = new Konva.Layer();
     this._gridLayer = new Konva.Layer();
+    this._commentLayer = new Konva.Layer();
     this._stage.add(this._gridLayer);
     this.drawGrid(); // Draw the initial grid
 
@@ -198,6 +207,7 @@ export default class StateManager {
     });
     this._transitionLayer.add(this._startStateLine);
 
+    this._stage.add(this._commentLayer);
     this._stage.add(this._transitionLayer);
     this._stage.add(this._nodeLayer);
 
@@ -440,7 +450,84 @@ export default class StateManager {
   private static onDoubleClick(evt: Konva.KonvaEventObject<MouseEvent>) {
     if (StateManager.currentTool == Tool.States) {
       StateManager.addStateAtDoubleClickPos(evt);
+    } else if (StateManager.currentTool == Tool.Comment) {
+      StateManager.addCommentAtDoubleClickPos(evt);
     }
+  }
+
+  /** Transforms a vector from absolute to stage space (assumes _stage is a valid Konva.Stage) */
+  private static toStageSpace(vec: Vector2d): Vector2d {
+    // Convert the pointer position to the stage's coordinate space
+    const scale = StateManager._stage.scaleX(); // Assuming uniform scaling for X and Y
+    const stagePos = StateManager._stage.position();
+
+    // Adjusting for the stage's position and scale
+    let x = (vec.x - stagePos.x) / scale;
+    let y = (vec.y - stagePos.y) / scale;
+
+    return {
+      x: (vec.x - stagePos.x) / scale,
+      y: (vec.y - stagePos.y) / scale,
+    };
+  }
+
+  /** Snaps a stage space vector to the grid */
+  private static snapStageVectorToGrid(vec: Vector2d): Vector2d {
+    const gridSpacing = 50; // Define your grid spacing value here
+
+    // No need to normalize the coordinates here since they're already in "stage space"
+    return {
+      x: Math.round(vec.x / gridSpacing) * gridSpacing,
+      y: Math.round(vec.y / gridSpacing) * gridSpacing,
+    };
+  }
+
+  /**
+   * Pushes an action to the action stack that adds a comment region to the automaton.
+   */
+  private static addCommentAtDoubleClickPos(
+    evt: Konva.KonvaEventObject<MouseEvent>,
+  ) {
+    if (!StateManager._stage) return;
+
+    const stage = StateManager._stage;
+    const pointerPosition = stage.getPointerPosition();
+    if (!pointerPosition) return;
+
+    let pos = StateManager.toStageSpace(pointerPosition);
+
+    // Snap to grid if enabled
+    if (StateManager._snapToGridEnabled) {
+      pos = StateManager.snapStageVectorToGrid(pos);
+    }
+
+    const newCommentRegion = new CommentRegion();
+    let addCommentForward = (data: CreateCommentActionData) => {
+      newCommentRegion.createKonvaObjects(
+        data.x,
+        data.y,
+        CommentRegion.InitialWidth,
+        CommentRegion.InitialHeight,
+      );
+      StateManager._commentRegions.push(newCommentRegion);
+      StateManager._commentLayer?.add(newCommentRegion.nodeGroup);
+      StateManager._commentLayer?.draw();
+
+      data.commentRegion = newCommentRegion;
+    };
+
+    let addCommentBackward = (data: CreateCommentActionData) => {
+      this.deleteCommentRegion(data.commentRegion);
+    };
+
+    let addCommentAction = new Action(
+      "addCommentRegion",
+      `Add Comment Region`,
+      addCommentForward,
+      addCommentBackward,
+      { x: pos.x, y: pos.y, commentRegion: null },
+    );
+    UndoRedoManager.pushAction(addCommentAction);
   }
 
   /**
@@ -455,21 +542,11 @@ export default class StateManager {
     const pointerPosition = stage.getPointerPosition();
     if (!pointerPosition) return;
 
-    // Convert the pointer position to the stage's coordinate space
-    const scale = stage.scaleX(); // Assuming uniform scaling for X and Y
-    const stagePos = stage.position();
-
-    // Adjusting for the stage's position and scale
-    let x = (pointerPosition.x - stagePos.x) / scale;
-    let y = (pointerPosition.y - stagePos.y) / scale;
+    let pos = StateManager.toStageSpace(pointerPosition);
 
     // Snap to grid if enabled
     if (StateManager._snapToGridEnabled) {
-      const gridSpacing = 50; // Define your grid spacing value here
-
-      // No need to normalize the coordinates here since they're already in "stage space"
-      x = Math.round(x / gridSpacing) * gridSpacing;
-      y = Math.round(y / gridSpacing) * gridSpacing;
+      pos = StateManager.snapStageVectorToGrid(pos);
     }
 
     let highestNumber = 0;
@@ -508,7 +585,7 @@ export default class StateManager {
       `Add "${newStateWrapperName}"`,
       addNodeForward,
       addNodeBackward,
-      { x: x, y: y, node: null },
+      { x: pos.x, y: pos.y, node: null },
     );
     UndoRedoManager.pushAction(addNodeAction);
   }
@@ -1645,6 +1722,19 @@ export default class StateManager {
   }
 
   /**
+   * Immediately deletes the given commentRegion from the automaton
+   *
+   * **NOTE:** This method is *not* undo/redo safe.
+   * @param comment The CommentRegion to remove.
+   */
+  public static deleteCommentRegion(comment: CommentRegion) {
+    const index = StateManager._commentRegions.indexOf(comment);
+    if (index > -1) StateManager._commentRegions.splice(index, 1);
+
+    comment.nodeGroup.remove();
+  }
+
+  /**
    * Called when the user uses the mouse scroll wheel.
    * This causes the state diagram view to be zoomed in or out.
    * @param ev
@@ -2429,4 +2519,16 @@ class CutActionData extends ActionData {
 
   /** Whether any of the nodes removed were the start node. */
   public wasStartNode: boolean = false;
+}
+
+/** Holds the data associated with a "create comment" action. */
+class CreateCommentActionData extends ActionData {
+  /** The X coordinate where the comment region is created. */
+  public x: number;
+
+  /** The Y coordinate where the comment region is created. */
+  public y: number;
+
+  /** The comment region created in this action. */
+  public commentRegion: CommentRegion;
 }
